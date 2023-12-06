@@ -1,0 +1,197 @@
+---
+title: "Анализ логов с помощью языка R"
+author: Скаев Сармат, БИСО-02-20
+format: 
+    md:
+        output-file: README.md
+engine: knitr
+---
+
+## Цель работы
+
+1.  Закрепить практические навыки использования языка программирования R для обработки данных
+
+
+## Задание
+
+Провести анализ журналов
+
+## Ход работы
+
+## Подготовка данных
+
+```{r}
+library(dplyr)
+library(lubridate)
+```
+
+
+```{r}
+dataInputFirst = read.csv("mir.csv-01.csv", nrows = 167)
+dataInputFirst %>% glimpse()
+```
+
+```{r}
+dataInputFirst <- dataInputFirst %>% 
+  mutate_at(vars(BSSID, Privacy, Cipher, Authentication, LAN.IP, ESSID), trimws) %>%
+  mutate_at(vars(BSSID, Privacy, Cipher, Authentication, LAN.IP, ESSID), na_if, "") %>% 
+  mutate_at(vars(First.time.seen, Last.time.seen), as.POSIXct, format = "%Y-%m-%d %H:%M:%S")
+
+dataInputFirst %>% head
+```
+
+```{r}
+dataInputSecond = read.csv("mir.csv-01.csv", skip = 169)
+dataInputSecond %>% glimpse()
+```
+
+```{r}
+dataInputSecond <- dataInputSecond %>% 
+  mutate_at(vars(Station.MAC, BSSID, Probed.ESSIDs), trimws) %>%
+  mutate_at(vars(Station.MAC, BSSID, Probed.ESSIDs), na_if, "")
+
+dataInputSecond <- dataInputSecond %>% 
+  mutate_at(vars(First.time.seen, Last.time.seen), 
+            as.POSIXct, 
+            format = "%Y-%m-%d %H:%M:%S") %>%
+  mutate_at(vars(Power, X..packets), as.integer) %>%
+  filter(!is.na(BSSID))
+  
+dataInputSecond %>% head
+```
+
+## Анализ данных
+
+## Определить небезопасные точки доступа
+
+```{r}
+openvifi <- dataInputFirst %>% 
+  filter(grepl("OPN", Privacy)) %>%
+  select(BSSID, ESSID) %>%
+  arrange(BSSID) %>%
+  distinct
+
+openvifi
+```
+
+## Определить производителя для каждого обнаруженного устройства
+```{text}
+00:03:7A Taiyo Yuden Co., Ltd.
+00:03:7F Atheros Communications, Inc.
+00:25:00 Apple, Inc.
+00:26:99 Cisco Systems, Inc
+E0:D9:E3 Eltex Enterprise Ltd.
+E8:28:C1 Eltex Enterprise Ltd.
+```
+
+## Выявить устройства, использующие последнюю версию протокола шифрования WPA3, и названия точек доступа, реализованных на этих устройствах
+
+```{r}
+dataInputFirst %>%
+  filter(grepl("WPA3", Privacy)) %>%
+  select(BSSID, ESSID, Privacy)
+```
+
+## Отсортировать точки доступа по интервалу времени, в течение которого они находились на связи, по убыванию
+
+```{r}
+dataInputFirst_with_intervals <- dataInputFirst %>% 
+  mutate(Time.Interval = Last.time.seen - First.time.seen)
+
+dataInputFirst_with_intervals %>%
+  arrange(desc(Time.Interval)) %>%
+  mutate(Time.Interval = seconds_to_period(Time.Interval)) %>%
+  select(BSSID, First.time.seen, Last.time.seen, Time.Interval) %>%
+  head
+```
+
+## Обнаружить топ-10 самых быстрых точек доступа
+
+```{r}
+topspots <- dataInputFirst %>%
+  arrange(desc(Speed)) %>%
+  select(BSSID, ESSID, Speed, Privacy) %>%
+  head(10)
+
+topspots
+```
+
+## Отсортировать точки доступа по частоте отправки запросов
+
+```{r}
+dataInputFirst_with_beacon_frequency <- dataInputFirst_with_intervals %>% 
+    mutate(beacon_rate = as.double(X..beacons) / as.integer(Time.Interval))
+
+dataInputFirst_with_beacon_frequency %>%
+  select(BSSID, ESSID, Privacy, X..beacons, Time.Interval, beacon_rate) %>%
+  filter(!is.infinite(beacon_rate)) %>%
+  arrange(desc(beacon_rate)) %>%
+  head
+```
+
+## Данные клиентов
+
+## Определить производителя для каждого обнаруженного устройства
+
+```{r}
+dataInputSecond %>%
+  filter(grepl("(..:..:..:)(..:..:..)", BSSID)) %>%
+  distinct(BSSID)
+```
+
+```{text}
+00:03:7F Atheros Communications, Inc.
+00:0D:97 Hitachi Energy USA Inc.
+00:23:EB Cisco Systems, Inc
+00:25:00 Apple, Inc.
+00:26:99 Cisco Systems, Inc
+08:3A:2F Guangzhou Juan Intelligent Tech Joint Stock Co.,Ltd
+0C:80:63 Tp-Link Technologies Co.,Ltd.
+DC:09:4C Huawei Technologies Co.,Ltd
+E0:D9:E3 Eltex Enterprise Ltd.
+E8:28:C1 Eltex Enterprise Ltd.
+```
+
+
+## Обнаружить устройства, которые НЕ рандомизируют свой MAC адрес
+
+```{r}
+dataInputSecond %>%
+  filter(grepl("(..:..:..:)(..:..:..)", BSSID) & !is.na(Probed.ESSIDs)) %>%
+  select(BSSID, Probed.ESSIDs) %>%
+  group_by(BSSID, Probed.ESSIDs) %>%
+  filter(n() > 1) %>%
+  arrange(BSSID) %>%
+  unique()
+```
+
+## Кластеризовать запросы от устройств к точкам доступа по их именам. Определить время появления устройства в зоне радиовидимости и время выхода его из нее
+
+```{r}
+cData <- dataInputSecond %>%
+  filter(!is.na(Probed.ESSIDs)) %>%
+  group_by(Station.MAC, Probed.ESSIDs) %>%
+  arrange(First.time.seen)
+
+cSum <- cData %>%
+  summarise(Cluster_Start_Time = min(First.time.seen),
+            Cluster_End_Time = max(Last.time.seen),
+            Total_Power = sum(Power))
+
+cSum %>% head(10)
+```
+
+## Оценить стабильность уровня сигнала внури кластера во времени. Выявить наиболее стабильный кластер. Для оценки стабильности оценить математическое ожидание и среднеквадратичное отклонение для каждого найденного кластера.
+
+```{r}
+sMetric <- cData %>%
+  group_by(Station.MAC, Probed.ESSIDs) %>%
+  summarise(Mean_Power = mean(Power))
+
+sMetric %>%
+  arrange((Mean_Power)) %>% head(1)
+```
+
+## Вывод
+
+Были закреплены навыки работы с пакетом `dplyr` и языком R
